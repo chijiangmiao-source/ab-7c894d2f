@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>轨道应急规程安全审计</title>
+<style>
+  :root { --ok:#137333; --bad:#b3261e; --warn:#8a5a00; --line:#d7dbe3; }
+  * { box-sizing: border-box; }
+  body { font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+         margin: 0; background: #f5f6f8; color: #1f2430; }
+  header { background: #102a43; color: #fff; padding: 14px 24px; }
+  header h1 { font-size: 18px; margin: 0; }
+  header p { margin: 4px 0 0; font-size: 12px; opacity: .75; }
+  main { max-width: 1080px; margin: 20px auto; padding: 0 16px 48px; }
+  section { background: #fff; border: 1px solid var(--line); border-radius: 8px;
+            padding: 16px 20px; margin-bottom: 16px; }
+  label { display: block; font-size: 13px; font-weight: 600; margin: 10px 0 4px; }
+  input[type=text] { width: 100%; padding: 8px 10px; border: 1px solid var(--line);
+                     border-radius: 6px; font-size: 14px; }
+  textarea { width: 100%; min-height: 260px; padding: 10px; border: 1px solid var(--line);
+             border-radius: 6px; font-family: ui-monospace, Consolas, monospace;
+             font-size: 12.5px; line-height: 1.5; }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 240px; }
+  .actions { margin-top: 14px; display: flex; gap: 10px; align-items: center; }
+  button { padding: 9px 18px; border: 0; border-radius: 6px; font-size: 14px;
+           cursor: pointer; }
+  #submit { background: #1a5fb4; color: #fff; }
+  #load { background: #e8ecf3; color: #1f2430; }
+  .hint { font-size: 12px; color: #5b6472; }
+  .banner { padding: 12px 16px; border-radius: 6px; font-weight: 600; margin-bottom: 12px; }
+  .banner.safe   { background: #e6f4ea; color: var(--ok);   border: 1px solid #a8d5b5; }
+  .banner.danger { background: #fdecea; color: var(--bad);  border: 1px solid #f1b0aa; }
+  .banner.invalid{ background: #fff4e0; color: var(--warn); border: 1px solid #ecd09a; }
+  .banner.conflict{ background: #fdecea; color: var(--bad); border: 1px solid #f1b0aa; }
+  .replayed { font-size: 12px; font-weight: 400; margin-left: 8px; opacity: .8; }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; margin-top: 8px; }
+  th, td { border: 1px solid var(--line); padding: 6px 8px; text-align: left;
+           vertical-align: top; }
+  th { background: #f0f2f6; }
+  tr.danger-row td { background: #fdecea; font-weight: 600; }
+  .mono { font-family: ui-monospace, Consolas, monospace; }
+  .stack { color: #40546e; }
+  ul.errors { margin: 8px 0 0; padding-left: 20px; }
+  ul.errors li { margin: 4px 0; font-size: 13px; }
+  .code { font-family: ui-monospace, Consolas, monospace; background: #f0f2f6;
+          padding: 1px 5px; border-radius: 4px; }
+  #result:empty { display: none; }
+  .cleared { font-size: 12px; color: #8a5a00; margin-top: 8px; display: none; }
+  h3 { margin: 14px 0 6px; font-size: 14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>轨道应急规程安全审计</h1>
+  <p>录入稳定审计标识、根入口与至多 12 份规程；服务按调用栈精确求解危险可达性并冻结结论。</p>
+</header>
+<main>
+  <section>
+    <div class="row">
+      <div>
+        <label for="auditId">稳定审计标识</label>
+        <input type="text" id="auditId" placeholder="例如 audit-2026-001">
+      </div>
+      <div>
+        <label for="rootEntry">根入口（规程标识）</label>
+        <input type="text" id="rootEntry" placeholder="例如 launch">
+      </div>
+    </div>
+    <label for="procs">规程（JSON 数组，至多 12 份；节点类型 jump / call / return，任意节点可标 danger）</label>
+    <textarea id="procs" spellcheck="false"></textarea>
+    <div class="actions">
+      <button id="submit">提交审计</button>
+      <button id="load">按标识读取冻结证据</button>
+      <span class="hint">草稿一旦改变，旧显示即被清除；同标识同载荷重传将回放冻结结论。</span>
+    </div>
+    <div class="cleared" id="clearedTip">草稿已改变，旧显示已清除。</div>
+  </section>
+  <section id="result"></section>
+</main>
+<script>
+const EXAMPLE = [
+  {
+    "id": "launch",
+    "entry": "l1",
+    "nodes": [
+      {"id": "l1", "type": "jump", "to": "l2"},
+      {"id": "l2", "type": "call", "target": "vent", "continuation": "l3"},
+      {"id": "l3", "type": "return"}
+    ]
+  },
+  {
+    "id": "vent",
+    "entry": "v1",
+    "nodes": [
+      {"id": "v1", "type": "jump", "to": ["v2", "v3"]},
+      {"id": "v2", "type": "call", "target": "vent", "continuation": "v4"},
+      {"id": "v3", "type": "return"},
+      {"id": "v4", "type": "jump", "to": "v5"},
+      {"id": "v5", "type": "return", "danger": true}
+    ]
+  }
+];
+
+const $ = id => document.getElementById(id);
+const resultBox = $("result");
+let dirty = false;
+
+$("procs").value = JSON.stringify(EXAMPLE, null, 2);
+$("auditId").value = "demo-001";
+$("rootEntry").value = "launch";
+
+function clearResult() {
+  if (resultBox.innerHTML !== "") {
+    resultBox.innerHTML = "";
+    $("clearedTip").style.display = "block";
+    setTimeout(() => $("clearedTip").style.display = "none", 2500);
+  }
+}
+// 草稿改变清除旧显示
+["auditId", "rootEntry", "procs"].forEach(id =>
+  $(id).addEventListener("input", () => { dirty = true; clearResult(); }));
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g,
+    c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+function banner(cls, text, replayed) {
+  return `<div class="banner ${cls}">${esc(text)}` +
+    (replayed ? `<span class="replayed">（回放冻结结论）</span>` : "") + `</div>`;
+}
+
+function renderErrors(errors) {
+  const items = errors.map(e =>
+    `<li><span class="code">${esc(e.code)}</span> ${esc(e.message)}</li>`).join("");
+  return `<h3>校验错误（共 ${errors.length} 项，一次指出）</h3><ul class="errors">${items}</ul>`;
+}
+
+function renderSteps(steps) {
+  const rows = steps.map(s => {
+    const detail = esc(JSON.stringify(s.detail));
+    const stack = s.stack.length
+      ? `<span class="stack mono">${esc(s.stack.join(" ⇢ "))}</span>` : "<span class='stack'>（空栈）</span>";
+    const opName = {start:"起点", jump:"普通跳转", call:"调用", return:"返回", enter:"进入"}[s.op] || s.op;
+    return `<tr class="${s.danger ? "danger-row" : ""}">
+      <td>${s.seq}</td><td>${opName}</td>
+      <td class="mono">${esc(s.location)}${s.danger ? " ⚠" : ""}</td>
+      <td class="mono">${detail}</td><td>${stack}</td></tr>`;
+  }).join("");
+  return `<h3>可重放证据链（含每步调用栈）</h3>
+    <table><thead><tr><th>#</th><th>操作</th><th>位置</th><th>详情</th><th>调用栈（底→顶）</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+}
+
+function renderSummaries(summaries) {
+  const rows = Object.entries(summaries).map(([p, rets]) =>
+    `<tr><td class="mono">${esc(p)}</td><td class="mono">${rets.length ? esc(rets.join(", ")) : "（无可返回节点）"}</td></tr>`).join("");
+  return `<h3>可返回摘要（饱和匹配调用与返回）</h3>
+    <table><thead><tr><th>规程</th><th>可返回节点</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function render(body, status) {
+  let html = "";
+  if (status === 409 || body.error === "conflict") {
+    html = banner("conflict", "明确拒绝：" + (body.message || "同标识异载荷"));
+  } else if (body.verdict === "invalid") {
+    html = banner("invalid", "载荷未通过校验") + renderErrors(body.errors || []);
+  } else if (body.verdict === "danger") {
+    html = banner("danger", body.message, body.replayed)
+         + renderSteps(body.steps || []) + renderSummaries(body.summaries || {});
+  } else if (body.verdict === "safe") {
+    html = banner("safe", body.message, body.replayed)
+      + `<p>根入口 <span class="code">${esc(body.root_entry)}</span> 可达规程：`
+      + (body.reachable_procedures || []).map(p => `<span class="code">${esc(p)}</span>`).join(" ")
+      + `</p>` + renderSummaries(body.summaries || {});
+  } else {
+    html = banner("invalid", "未知响应：" + esc(JSON.stringify(body)));
+  }
+  resultBox.innerHTML = html;
+}
+
+async function submit() {
+  let procedures;
+  try {
+    procedures = JSON.parse($("procs").value || "[]");
+  } catch (e) {
+    resultBox.innerHTML = banner("invalid", "规程 JSON 解析失败：" + e.message);
+    return;
+  }
+  if (Array.isArray(procedures) && procedures.length > 12) {
+    resultBox.innerHTML = banner("invalid", "规程数量超过上限 12，请删减后再提交");
+    return;
+  }
+  const payload = {
+    audit_id: $("auditId").value.trim(),
+    root_entry: $("rootEntry").value.trim(),
+    procedures: procedures
+  };
+  const resp = await fetch("/api/audits", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(payload)
+  });
+  const body = await resp.json();
+  render(body, resp.status);
+  dirty = false;
+  if (resp.status === 200 && payload.audit_id) {
+    history.replaceState(null, "", "?audit_id=" + encodeURIComponent(payload.audit_id));
+  }
+}
+
+async function loadById(id) {
+  const auditId = (id || $("auditId").value).trim();
+  if (!auditId) {
+    resultBox.innerHTML = banner("invalid", "请先填写审计标识再读取");
+    return;
+  }
+  const resp = await fetch("/api/audits/" + encodeURIComponent(auditId));
+  const body = await resp.json();
+  if (resp.status === 404) {
+    resultBox.innerHTML = banner("invalid", body.message || "未找到该审计标识");
+    return;
+  }
+  // 用冻结载荷回填表单，并渲染冻结结论
+  $("auditId").value = body.payload.audit_id || auditId;
+  $("rootEntry").value = body.payload.root_entry || "";
+  $("procs").value = JSON.stringify(body.payload.procedures || [], null, 2);
+  render(Object.assign({}, body.result, {replayed: true}), 200);
+  dirty = false;
+  history.replaceState(null, "", "?audit_id=" + encodeURIComponent(auditId));
+}
+
+$("submit").addEventListener("click", submit);
+$("load").addEventListener("click", () => loadById());
+
+// 刷新后仍可按审计标识读取相同证据
+window.addEventListener("DOMContentLoaded", () => {
+  const id = new URLSearchParams(location.search).get("audit_id");
+  if (id) loadById(id);
+});
+</script>
+</body>
+</html>
